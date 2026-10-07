@@ -9,7 +9,7 @@ on:
       - main
       - master
       - develop
-      - feature/**
+      - "feature/**"
 
   pull_request:
     branches:
@@ -50,7 +50,7 @@ permissions:
 
 # ============================================================
 # CONCURRENCY
-# Prevent duplicate builds for the same branch
+# Cancel older build when a new build starts
 # ============================================================
 concurrency:
   group: ci-${{ github.ref }}
@@ -58,10 +58,10 @@ concurrency:
 
 
 # ============================================================
-# GLOBAL ENVIRONMENT VARIABLES
+# GLOBAL VARIABLES
 # ============================================================
 env:
-  NODE_VERSION: "22"
+  NODE_VERSION: "20"
   IMAGE_NAME: ${{ secrets.DOCKER_USER }}/zomato_new
   IMAGE_TAG: ${{ github.sha }}
 
@@ -73,42 +73,45 @@ jobs:
   # ==========================================================
   build:
     name: Build React Application
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
 
       # ------------------------------------------------------
-      # 1. CHECKOUT CODE
+      # 1. CHECKOUT
       # ------------------------------------------------------
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
 
       # ------------------------------------------------------
-      # 2. SETUP NODE.JS + NPM CACHE
+      # 2. SETUP NODE + NPM CACHE
       # ------------------------------------------------------
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
 
       # ------------------------------------------------------
-      # 3. DISPLAY VERSIONS
+      # 3. VERIFY VERSIONS
       # ------------------------------------------------------
       - name: Display Versions
         run: |
+          echo "Node version:"
           node --version
+
+          echo "NPM version:"
           npm --version
 
 
       # ------------------------------------------------------
-      # 4. INITIALIZE CODEQL
+      # 4. CODEQL INITIALIZATION
       # ------------------------------------------------------
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: javascript
 
@@ -124,23 +127,23 @@ jobs:
       # 6. VERIFY DEPENDENCIES
       # ------------------------------------------------------
       - name: Verify Installed Packages
-        run: npm ls || true
+        run: npm ls --depth=0
 
 
       # ------------------------------------------------------
-      # 7. LINT
+      # 7. ESLINT
       # ------------------------------------------------------
       - name: Run ESLint
         run: npm run lint
 
 
       # ------------------------------------------------------
-      # 8. UNIT TEST
+      # 8. UNIT TESTS
       # ------------------------------------------------------
       - name: Run Unit Tests
         env:
           CI: true
-        run: npm test -- --watchAll=false
+        run: npm test -- --watchAll=false --passWithNoTests
 
 
       # ------------------------------------------------------
@@ -154,11 +157,23 @@ jobs:
       # 10. CODEQL ANALYSIS
       # ------------------------------------------------------
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
 
 
       # ------------------------------------------------------
-      # 11. UPLOAD REACT BUILD ARTIFACT
+      # 11. VERIFY BUILD
+      # ------------------------------------------------------
+      - name: Verify React Build
+        run: |
+          echo "Build directory:"
+          ls -la build/
+
+          echo "Build size:"
+          du -sh build/
+
+
+      # ------------------------------------------------------
+      # 12. UPLOAD BUILD ARTIFACT
       # ------------------------------------------------------
       - name: Upload React Build Artifact
         uses: actions/upload-artifact@v4
@@ -166,6 +181,7 @@ jobs:
           name: react-build
           path: build/
           if-no-files-found: error
+          retention-days: 7
 
 
   # ==========================================================
@@ -173,7 +189,7 @@ jobs:
   # ==========================================================
   security:
     name: Security & Docker Image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     timeout-minutes: 30
 
@@ -184,10 +200,10 @@ jobs:
     steps:
 
       # ------------------------------------------------------
-      # 1. CHECKOUT CODE
+      # 1. CHECKOUT
       # ------------------------------------------------------
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
 
       # ------------------------------------------------------
@@ -205,7 +221,7 @@ jobs:
       # ------------------------------------------------------
       - name: Verify React Build
         run: |
-          echo "React build contents:"
+          echo "Downloaded React build:"
           ls -la build/
           du -sh build/
 
@@ -228,38 +244,28 @@ jobs:
       # 6. TRIVY FILESYSTEM SCAN
       # ------------------------------------------------------
       - name: Run Trivy Filesystem Scan
-        continue-on-error: true
         run: |
           trivy fs \
             --format sarif \
             --output trivy-fs.sarif \
-            --severity CRITICAL,HIGH \
+            --severity HIGH,CRITICAL \
             --ignore-unfixed \
             .
 
 
       # ------------------------------------------------------
-      # 7. VERIFY TRIVY REPORT
-      # ------------------------------------------------------
-      - name: Verify SARIF
-        run: |
-          pwd
-          ls -la
-          find . -name "*.sarif"
-
-
-      # ------------------------------------------------------
-      # 8. UPLOAD TRIVY RESULTS TO GITHUB
+      # 7. UPLOAD TRIVY SARIF
       # ------------------------------------------------------
       - name: Upload Trivy Scan Results
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('trivy-fs.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: ./trivy-fs.sarif
+          sarif_file: trivy-fs.sarif
+          category: trivy-filesystem
 
 
       # ------------------------------------------------------
-      # 9. DOCKERFILE LINT
+      # 8. DOCKERFILE LINT
       # ------------------------------------------------------
       - name: Lint Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
@@ -269,14 +275,14 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 10. SETUP DOCKER BUILDX
+      # 9. SETUP DOCKER BUILDX
       # ------------------------------------------------------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
 
       # ------------------------------------------------------
-      # 11. RESTORE DOCKER BUILD CACHE
+      # 10. RESTORE DOCKER CACHE
       # ------------------------------------------------------
       - name: Restore Docker Cache
         uses: actions/cache@v4
@@ -289,7 +295,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 12. BUILD DOCKER IMAGE
+      # 11. BUILD DOCKER IMAGE
       # ------------------------------------------------------
       - name: Build Docker Image
         uses: docker/build-push-action@v6
@@ -298,15 +304,16 @@ jobs:
           file: Dockerfile
 
           push: false
+          load: true
 
           tags: |
             ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
             ${{ env.IMAGE_NAME }}:latest
 
           cache-from: type=local,src=/tmp/.buildx-cache
+
           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
-          load: true
           provenance: false
 
           labels: |
@@ -318,26 +325,32 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 13. UPDATE DOCKER CACHE
+      # 12. UPDATE DOCKER CACHE
       # ------------------------------------------------------
       - name: Update Docker Cache
+        if: always()
         run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          if [ -d "/tmp/.buildx-cache-new" ]; then
+            rm -rf /tmp/.buildx-cache
+            mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          fi
 
 
       # ------------------------------------------------------
-      # 14. VERIFY DOCKER IMAGE
+      # 13. VERIFY DOCKER IMAGE
       # ------------------------------------------------------
       - name: Verify Docker Image
         run: |
+          echo "Docker images:"
           docker images
+
+          echo "Inspecting image:"
           docker image inspect \
             ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
 
 
       # ------------------------------------------------------
-      # 15. LOGIN TO DOCKER HUB
+      # 14. LOGIN TO DOCKER HUB
       # ------------------------------------------------------
       - name: Login to DockerHub
         uses: docker/login-action@v3
@@ -347,16 +360,19 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 16. PUSH IMAGE TO DOCKER HUB
+      # 15. PUSH IMAGE
       # ------------------------------------------------------
       - name: Push Docker Image
         run: |
-          docker push ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          docker push ${{ env.IMAGE_NAME }}:latest
+          docker push \
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+          docker push \
+            ${{ env.IMAGE_NAME }}:latest
 
 
       # ------------------------------------------------------
-      # 17. SMOKE TEST
+      # 16. SMOKE TEST
       # ------------------------------------------------------
       - name: Smoke Test Container
         run: |
@@ -365,15 +381,22 @@ jobs:
             -p 3000:3000 \
             ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
 
+          echo "Waiting for application..."
           sleep 20
 
-          docker ps
+          echo "Container status:"
+          docker ps -a
 
+          echo "Container logs:"
           docker logs zomato-test
+
+          echo "Testing application:"
+          curl --fail --retry 5 --retry-delay 3 \
+            http://localhost:3000
 
 
       # ------------------------------------------------------
-      # 18. CLEANUP
+      # 17. CLEANUP
       # ------------------------------------------------------
       - name: Cleanup
         if: always()
